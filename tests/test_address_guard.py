@@ -40,6 +40,7 @@ LOOPBACK = "127.0.0.1"
         "::ffff:169.254.169.254",
         "64:ff9b::a00:5",  # NAT64 of 10.0.0.5
         "2002:a00:5::",  # 6to4 of 10.0.0.5
+        "2002:a9fe:a9fe::",  # 6to4 of 169.254.169.254
     ],
 )
 def test_non_public_addresses(address: str) -> None:
@@ -47,7 +48,15 @@ def test_non_public_addresses(address: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "address", ["8.8.8.8", "93.184.215.14", "2606:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808"]
+    "address",
+    [
+        "8.8.8.8",
+        "93.184.215.14",
+        "2606:4700::1111",
+        "::ffff:8.8.8.8",
+        "64:ff9b::808:808",  # NAT64 of 8.8.8.8
+        "2002:808:808::",  # 6to4 of 8.8.8.8
+    ],
 )
 def test_public_addresses(address: str) -> None:
     assert is_public_address(ipaddress.ip_address(address))

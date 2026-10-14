@@ -33,11 +33,15 @@ def is_public_address(ip: IPAddress) -> bool:
 
     Loopback, private, link-local, carrier-grade NAT, documentation, reserved, and multicast
     addresses are not public. IPv4 addresses embedded in IPv6 (``::ffff:10.0.0.1``, NAT64
-    ``64:ff9b::10.0.0.1``) are judged by the IPv4 address.
+    ``64:ff9b::10.0.0.1``, 6to4 ``2002:a00:1::``) are judged by the IPv4 address.
     """
     if isinstance(ip, ipaddress.IPv6Address):
+        # Unwrapped explicitly: Python's own tables for these ranges changed between patch
+        # releases (3.11.9 calls 6to4 of 10.0.0.5 global), so the answer must not rely on them.
         if ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped
+        elif ip.sixtofour is not None:
+            ip = ip.sixtofour
         elif ip in _NAT64:
             ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
     return ip.is_global and not ip.is_multicast
