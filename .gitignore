@@ -1,0 +1,45 @@
+# Claude / planning files: never commit
+/PLAN.md
+/PROGRESS.md
+/CLAUDE.md
+/CLAUDE.local.md
+/.claude/
+
+# Materialized (real-named) malicious fixtures: generated, never commit
+/tests/fixtures/_materialized/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Training data, results, and model weights
+/training/data/
+/training/runs/
+*.onnx
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

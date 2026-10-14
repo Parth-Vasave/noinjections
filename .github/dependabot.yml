@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Bumps the SHA-pinned actions in workflows (and their "# vX.Y.Z" comments).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

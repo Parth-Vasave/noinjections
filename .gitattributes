@@ -1,0 +1,7 @@
+# Normalise text files to LF in the repo and in checkouts (Windows CI
+# otherwise checks out CRLF via core.autocrlf).
+* text=auto eol=lf
+
+# Fixtures are stored byte-for-byte: no line-ending conversion, so deliberate
+# odd characters and endings in payloads survive on every OS.
+tests/fixtures/** -text
