@@ -1,9 +1,9 @@
-"""Classify a CLI target string as a GitHub repo, a generic web URL, or a local file/directory."""
+"""Classify a CLI target string as a GitHub repo or file, a web URL, or a local file/directory."""
 
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from noinjections.models import SourceKind
 
@@ -52,6 +52,42 @@ class GitHubRepoTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class GitHubFileTarget:
+    """A single file in a GitHub repository (a ``/blob/`` or ``raw.githubusercontent.com`` URL).
+
+    ``ref_path`` is ``<ref>/<path>`` as one percent-decoded string. Raw and blob URLs both accept
+    the two joined, so unlike :class:`GitHubRepoTarget` it never needs splitting.
+    """
+
+    owner: str
+    repo: str
+    ref_path: str
+
+    @property
+    def source(self) -> SourceKind:
+        return SourceKind.GITHUB
+
+    @property
+    def url(self) -> str:
+        """Canonical web URL of the file."""
+        return self.blob_url()
+
+    @property
+    def raw_url(self) -> str:
+        """URL serving the file's raw contents, for fetching."""
+        return f"https://raw.githubusercontent.com/{self.owner}/{self.repo}/{quote(self.ref_path)}"
+
+    def blob_url(self, line: int | None = None) -> str:
+        """Web URL of the file, optionally anchored at a 1-based ``line``, for reports."""
+        url = f"https://github.com/{self.owner}/{self.repo}/blob/{quote(self.ref_path)}"
+        if line is None:
+            return url
+        if line < 1:
+            raise ValueError(f"line must be >= 1, got {line}")
+        return f"{url}#L{line}"
+
+
+@dataclass(frozen=True, slots=True)
 class LocalTarget:
     """An existing local file or directory, as an absolute resolved path."""
 
@@ -63,11 +99,14 @@ class LocalTarget:
         return SourceKind.LOCAL
 
 
-Target = WebTarget | GitHubRepoTarget | LocalTarget
+Target = WebTarget | GitHubRepoTarget | GitHubFileTarget | LocalTarget
 
 _HTTP_SCHEME = re.compile(r"^https?://", re.IGNORECASE)
 _ANY_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+_GITHUB_RAW_HOST = "raw.githubusercontent.com"
+# github.com/<owner>/<repo>/<view>/<ref>/<path> views that show a single file.
+_GITHUB_FILE_VIEWS = frozenset({"blob", "raw"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 # GitHub usernames: alphanumerics and single hyphens, no leading/trailing hyphen, max 39 chars.
@@ -113,8 +152,8 @@ def detect_target(raw: str) -> Target:
     """Classify and normalise a target string.
 
     Explicit ``http(s)://`` URLs are parsed as URLs; anything else is tried as a local path, and
-    finally as a schemeless ``github.com/owner/repo`` shorthand. Raises :class:`TargetError` if
-    the input fits none of these.
+    finally as a schemeless ``github.com/owner/repo[/blob/...]`` shorthand. Raises
+    :class:`TargetError` if the input fits none of these.
     """
     text = raw.strip()
     if not text:
@@ -132,7 +171,7 @@ def detect_target(raw: str) -> Target:
 
     if text.lower().startswith(("github.com/", "www.github.com/")):
         target = _classify_url(f"https://{text}")
-        if isinstance(target, GitHubRepoTarget):
+        if isinstance(target, GitHubRepoTarget | GitHubFileTarget):
             return target
 
     raise TargetError(
@@ -156,14 +195,15 @@ def _local_target(text: str) -> LocalTarget | None:
     raise TargetError(f"not a regular file or directory: {text!r}")
 
 
-def _classify_url(text: str) -> WebTarget | GitHubRepoTarget:
+def _classify_url(text: str) -> WebTarget | GitHubRepoTarget | GitHubFileTarget:
     url = normalize_url(text)
     parts = urlsplit(url)
+    github: GitHubRepoTarget | GitHubFileTarget | None = None
     if parts.hostname in _GITHUB_HOSTS:
-        repo = _github_repo(parts.path)
-        if repo is not None:
-            return repo
-    return WebTarget(url=url)
+        github = _github_page(parts.path)
+    elif parts.hostname == _GITHUB_RAW_HOST:
+        github = _github_raw_file(parts.path)
+    return github if github is not None else WebTarget(url=url)
 
 
 def normalize_url(text: str) -> str:
@@ -210,24 +250,53 @@ def _normalize_host(hostname: str) -> str:
     return host
 
 
-def _github_repo(path: str) -> GitHubRepoTarget | None:
-    """Parse ``/owner/repo[.git][/tree/<ref_path>]``; ``None`` for any other github.com page."""
+def _github_page(path: str) -> GitHubRepoTarget | GitHubFileTarget | None:
+    """Parse ``/owner/repo[.git][/tree/<ref_path>]`` or ``/owner/repo/(blob|raw)/<ref>/<path>``.
+
+    Returns ``None`` for any other github.com page.
+    """
     segments = [s for s in path.split("/") if s]
     if len(segments) < 2:
         return None
     owner, repo, *rest = segments
-    if rest and rest[0] != "tree":
+    if rest and rest[0] != "tree" and rest[0] not in _GITHUB_FILE_VIEWS:
         return None
     if repo.endswith(".git"):
         if rest:  # /owner/repo.git/tree/... is not a real GitHub URL
             return None
         repo = repo.removesuffix(".git")
-    if (
-        owner.lower() in _GITHUB_RESERVED_OWNERS
-        or not _GITHUB_OWNER.match(owner)
-        or not _GITHUB_REPO.match(repo)
-        or repo in {".", ".."}
-    ):
+    if not _valid_github_repo(owner, repo):
         return None
+    if rest and rest[0] in _GITHUB_FILE_VIEWS:
+        return _github_file(owner, repo, rest[1:])
     ref_path = unquote("/".join(rest[1:])) or None
     return GitHubRepoTarget(owner=owner, repo=repo, ref_path=ref_path)
+
+
+def _github_raw_file(path: str) -> GitHubFileTarget | None:
+    """Parse a ``raw.githubusercontent.com`` path: ``/owner/repo/<ref>/<path>``."""
+    segments = [s for s in path.split("/") if s]
+    if len(segments) < 2:
+        return None
+    owner, repo, *rest = segments
+    if not _valid_github_repo(owner, repo):
+        return None
+    return _github_file(owner, repo, rest)
+
+
+def _github_file(owner: str, repo: str, segments: list[str]) -> GitHubFileTarget | None:
+    """Build a file target from the ``<ref>/<path>`` segments; ``None`` unless both are present."""
+    ref_path = unquote("/".join(segments))
+    parts = ref_path.split("/")
+    if len(parts) < 2 or any(p in {"", ".", ".."} for p in parts):
+        return None
+    return GitHubFileTarget(owner=owner, repo=repo, ref_path=ref_path)
+
+
+def _valid_github_repo(owner: str, repo: str) -> bool:
+    return (
+        owner.lower() not in _GITHUB_RESERVED_OWNERS
+        and bool(_GITHUB_OWNER.match(owner))
+        and bool(_GITHUB_REPO.match(repo))
+        and repo not in {".", ".."}
+    )

@@ -4,6 +4,7 @@ import pytest
 
 from noinjections.models import SourceKind
 from noinjections.targets import (
+    GitHubFileTarget,
     GitHubRepoTarget,
     LocalTarget,
     TargetError,
@@ -41,6 +42,83 @@ def test_github_repo_urls(raw: str, owner: str, repo: str, ref_path: str | None)
 
 
 @pytest.mark.parametrize(
+    ("raw", "owner", "repo", "ref_path"),
+    [
+        ("https://github.com/octo/hello/blob/main/a.py", "octo", "hello", "main/a.py"),
+        (
+            "https://github.com/octo/hello/blob/v1.2/src/pkg/a.py",
+            "octo",
+            "hello",
+            "v1.2/src/pkg/a.py",
+        ),
+        (
+            "https://github.com/octo/hello/blob/feature/x/AGENTS.md",
+            "octo",
+            "hello",
+            "feature/x/AGENTS.md",
+        ),
+        ("https://github.com/octo/hello/raw/main/a.py", "octo", "hello", "main/a.py"),
+        (
+            "HTTPS://WWW.GitHub.com/Octo/Hello/blob/main/.cursorrules",
+            "Octo",
+            "Hello",
+            "main/.cursorrules",
+        ),
+        (
+            "https://github.com/octo/hello/blob/main/a.py?plain=1#L10-L20",
+            "octo",
+            "hello",
+            "main/a.py",
+        ),
+        (
+            "https://github.com/octo/hello/blob/main/my%20notes.md",
+            "octo",
+            "hello",
+            "main/my notes.md",
+        ),
+        ("https://raw.githubusercontent.com/octo/hello/main/a.py", "octo", "hello", "main/a.py"),
+        (
+            "https://raw.githubusercontent.com/octo/hello/refs/heads/main/docs/x.md",
+            "octo",
+            "hello",
+            "refs/heads/main/docs/x.md",
+        ),
+        ("github.com/octo/hello/blob/main/README.md", "octo", "hello", "main/README.md"),
+    ],
+)
+def test_github_file_urls(raw: str, owner: str, repo: str, ref_path: str) -> None:
+    target = detect_target(raw)
+    assert target == GitHubFileTarget(owner=owner, repo=repo, ref_path=ref_path)
+    assert target.source is SourceKind.GITHUB
+
+
+def test_github_file_urls_are_requoted() -> None:
+    target = GitHubFileTarget(owner="octo", repo="hello", ref_path="main/docs/my notes#1.md")
+    assert (
+        target.raw_url == "https://raw.githubusercontent.com/octo/hello/main/docs/my%20notes%231.md"
+    )
+    assert target.url == "https://github.com/octo/hello/blob/main/docs/my%20notes%231.md"
+    assert (
+        target.blob_url(42) == "https://github.com/octo/hello/blob/main/docs/my%20notes%231.md#L42"
+    )
+
+
+def test_github_file_urls_round_trip() -> None:
+    target = detect_target("https://github.com/octo/hello/blob/main/b%C3%BCcher%20list.md")
+    assert isinstance(target, GitHubFileTarget)
+    assert target.ref_path == "main/bücher list.md"
+    assert detect_target(target.raw_url) == target
+    assert detect_target(target.url) == target
+
+
+@pytest.mark.parametrize("line", [0, -1])
+def test_github_file_blob_url_rejects_bad_line(line: int) -> None:
+    target = GitHubFileTarget(owner="octo", repo="hello", ref_path="main/a.py")
+    with pytest.raises(ValueError, match="line must be >= 1"):
+        target.blob_url(line)
+
+
+@pytest.mark.parametrize(
     ("raw", "expected"),
     [
         ("https://example.com", "https://example.com/"),
@@ -56,14 +134,30 @@ def test_github_repo_urls(raw: str, owner: str, repo: str, ref_path: str | None)
         ("https://github.com/octo", "https://github.com/octo"),
         ("https://github.com/features/copilot", "https://github.com/features/copilot"),
         ("https://github.com/octo/hello/issues/1", "https://github.com/octo/hello/issues/1"),
-        (
-            "https://github.com/octo/hello/blob/main/a.py",
-            "https://github.com/octo/hello/blob/main/a.py",
-        ),
         ("https://gist.github.com/octo/abc123", "https://gist.github.com/octo/abc123"),
+        # blob/raw URLs without both a ref and a path are not files
+        ("https://github.com/octo/hello/blob/main", "https://github.com/octo/hello/blob/main"),
+        ("https://github.com/octo/hello/blob", "https://github.com/octo/hello/blob"),
         (
-            "https://raw.githubusercontent.com/o/r/main/x",
-            "https://raw.githubusercontent.com/o/r/main/x",
+            "https://github.com/octo/hello.git/blob/main/a.py",
+            "https://github.com/octo/hello.git/blob/main/a.py",
+        ),
+        (
+            "https://github.com/octo/hello/blob/main/%2E%2E/a.py",
+            "https://github.com/octo/hello/blob/main/%2E%2E/a.py",
+        ),
+        (
+            "https://github.com/orgs/octo/blob/main/a.py",
+            "https://github.com/orgs/octo/blob/main/a.py",
+        ),
+        (
+            "https://raw.githubusercontent.com/octo/hello/main",
+            "https://raw.githubusercontent.com/octo/hello/main",
+        ),
+        ("https://raw.githubusercontent.com/octo", "https://raw.githubusercontent.com/octo"),
+        (
+            "https://raw.githubusercontent.com/octo/hello/main/./a.py",
+            "https://raw.githubusercontent.com/octo/hello/main/./a.py",
         ),
     ],
 )
