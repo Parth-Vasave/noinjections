@@ -1,0 +1,2 @@
+Plain-text notes for the static fetcher tests.
+Nothing to see here.

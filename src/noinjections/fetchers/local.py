@@ -16,6 +16,7 @@ from noinjections.fetchers.content import (
     SkippedFile,
     SkipReason,
     decode_text,
+    text_encoding_for,
 )
 from noinjections.fetchers.gitignore import IgnoreRule, RuleSet, is_ignored, parse_gitignore
 
@@ -280,7 +281,7 @@ def _read_file(root: Path, rel: str, caps: tuple[int, int]) -> LocalFile | Skipp
     try:
         data = _read_bytes(path, max_bytes + 1)
         truncated = len(data) > max_bytes
-        text = decode_text(data[:max_bytes], truncated=truncated)
+        text = decode_text(data[:max_bytes], truncated=truncated, encoding=text_encoding_for(rel))
     except ContentRejected as exc:
         return SkippedFile(rel, exc.reason, exc.detail)
     except OSError as exc:

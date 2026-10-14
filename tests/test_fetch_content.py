@@ -7,6 +7,7 @@ from noinjections.fetchers.content import (
     ContentRejected,
     SkipReason,
     decode_text,
+    text_encoding_for,
 )
 
 
@@ -65,3 +66,29 @@ def test_truncated_utf16_drops_an_odd_byte() -> None:
 
 def test_truncated_input_keeps_invalid_bytes_before_the_cut() -> None:
     assert decode_text(b"\xffok", truncated=True) == "\ufffdok"
+
+
+def test_declared_encoding_is_used() -> None:
+    assert decode_text("café".encode("cp1252"), encoding="cp1252") == "café"
+
+
+def test_declared_encoding_skips_the_binary_sniff() -> None:
+    assert decode_text(b"\x00payload", encoding="utf-8") == "\x00payload"
+    assert decode_text("hi".encode("utf-16-le"), encoding="utf-16-le") == "hi"
+
+
+def test_bom_wins_over_a_declared_encoding() -> None:
+    assert decode_text(codecs.BOM_UTF8 + "é".encode(), encoding="cp1252") == "é"
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["notes.txt", "docs/README.md", "GUIDE.MD", "a.rst", "x.mdc", "AGENTS.md", ".cursorrules"],
+)
+def test_text_by_name(path: str) -> None:
+    assert text_encoding_for(path) == "utf-8"
+
+
+@pytest.mark.parametrize("path", ["logo.png", "main.py", "Makefile", ".txt", "data.bin"])
+def test_not_text_by_name(path: str) -> None:
+    assert text_encoding_for(path) is None
