@@ -14,6 +14,7 @@ from noinjections.models import (
     ScanResult,
     Severity,
     SourceKind,
+    TextSegment,
 )
 
 
@@ -77,7 +78,15 @@ def make_scan_result() -> ScanResult:
 
 @pytest.mark.parametrize(
     "model",
-    [make_provenance(), make_chunk(), make_hit(), make_finding(), make_scan_result()],
+    [
+        make_provenance(),
+        make_provenance(layer=Layer.CSS_HIDDEN, hidden_reason="display:none"),
+        TextSegment(text="hidden payload", provenance=make_provenance()),
+        make_chunk(),
+        make_hit(),
+        make_finding(),
+        make_scan_result(),
+    ],
     ids=lambda m: type(m).__name__,
 )
 def test_json_round_trip(model: BaseModel) -> None:
@@ -99,7 +108,7 @@ def test_enums_serialize_as_plain_strings() -> None:
 
 
 def test_unicode_text_survives_round_trip() -> None:
-    chunk = make_chunk(original_text="tag chars: \U000e0069\U000e0067 zwsp:​ rtl:‮")
+    chunk = make_chunk(original_text="tag chars: \U000e0069\U000e0067 zwsp:\u200b rtl:\u202e")
     assert Chunk.model_validate_json(chunk.model_dump_json()).original_text == chunk.original_text
 
 
@@ -198,6 +207,17 @@ def test_provenance_accepts_enum_values_as_strings() -> None:
     prov = make_provenance(source="web", layer="css_hidden", selector="body > div.x")
     assert prov.source is SourceKind.WEB
     assert prov.layer is Layer.CSS_HIDDEN
+
+
+def test_hidden_reason_requires_not_visible() -> None:
+    with pytest.raises(ValidationError, match="hidden_reason"):
+        make_provenance(visible=True, hidden_reason="display:none")
+    assert make_provenance(visible=True).hidden_reason is None
+
+
+def test_text_segment_rejects_empty_text() -> None:
+    with pytest.raises(ValidationError):
+        TextSegment(text="", provenance=make_provenance())
 
 
 def test_scan_result_duration_must_be_non_negative() -> None:

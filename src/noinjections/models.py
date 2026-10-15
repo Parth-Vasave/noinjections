@@ -86,6 +86,27 @@ class Provenance(_Model):
     selector: str | None = Field(default=None, description="CSS selector path, for web content.")
     layer: Layer
     visible: bool = Field(description="Whether a human viewing the content would see this text.")
+    hidden_reason: str | None = Field(
+        default=None,
+        description="How text that would otherwise show is hidden, e.g. 'display:none'.",
+    )
+
+    @model_validator(mode="after")
+    def _check_hidden_reason(self) -> Self:
+        if self.visible and self.hidden_reason is not None:
+            raise ValueError("hidden_reason is only allowed when visible is False")
+        return self
+
+
+class TextSegment(_Model):
+    """A piece of text from one layer of one source item, as an extractor found it.
+
+    Extractors produce segments; chunking (3.4) splits them into :class:`Chunk` objects.
+    ``provenance.line``/``column`` locate the start of the text in the source item.
+    """
+
+    text: str = Field(min_length=1)
+    provenance: Provenance
 
 
 class Chunk(_Model):
