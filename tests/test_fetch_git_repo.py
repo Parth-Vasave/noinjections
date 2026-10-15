@@ -40,6 +40,9 @@ def home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPat
 def git(cwd: Path, *args: str, stdin: bytes | None = None) -> str:
     assert GIT is not None
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    # Ignore the system config too: CI runners set up git-lfs there, whose clean filter would
+    # rewrite committed test files.
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
     config = [
         "user.name=Test",
         "user.email=test@example.com",
@@ -253,9 +256,9 @@ def test_bad_ref_paths(repo: Repo, ref_path: str) -> None:
 
 
 def test_ref_path_with_glob_characters_is_matched_literally(repo: Repo) -> None:
-    repo.commit({"docs/[x]*.md": "odd name"})
-    result = fetch(repo.publish(), "main/docs/[x]*.md")
-    assert paths(result) == ["docs/[x]*.md"]
+    repo.commit({"docs/[x].md": "odd name", "docs/x.md": "plain"})  # "*" isn't valid on Windows
+    result = fetch(repo.publish(), "main/docs/[x].md")
+    assert paths(result) == ["docs/[x].md"]
 
 
 def test_missing_sub_path(repo: Repo) -> None:
