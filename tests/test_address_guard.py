@@ -1,15 +1,12 @@
 import ipaddress
 import socket
-from dataclasses import dataclass, field
 
 import pytest
 
-from conftest import LocalServer
+from conftest import LOOPBACK, FakeNet, LocalServer, port_of
 from noinjections.fetchers import address_guard
 from noinjections.fetchers.address_guard import is_public_address
 from noinjections.fetchers.web import WebFetchError, fetch_url
-
-LOOPBACK = "127.0.0.1"
 
 
 @pytest.mark.parametrize(
@@ -60,36 +57,6 @@ def test_non_public_addresses(address: str) -> None:
 )
 def test_public_addresses(address: str) -> None:
     assert is_public_address(ipaddress.ip_address(address))
-
-
-@dataclass
-class FakeNet:
-    """Canned DNS answers, and the addresses treated as public in place of real ones."""
-
-    answers: dict[str, list[str]] = field(default_factory=dict)
-    public: set[str] = field(default_factory=lambda: {LOOPBACK})
-
-
-@pytest.fixture
-def fake_net(monkeypatch: pytest.MonkeyPatch) -> FakeNet:
-    # The local server (127.0.0.1) stands in for a public site; nothing here leaves the machine.
-    net = FakeNet()
-    real_resolve = address_guard._resolve
-    real_is_public = address_guard.is_public_address
-
-    def resolve(host: str, port: int) -> list[str]:
-        return net.answers.get(host) or real_resolve(host, port)
-
-    def is_public(ip: address_guard.IPAddress) -> bool:
-        return str(ip) in net.public or real_is_public(ip)
-
-    monkeypatch.setattr(address_guard, "_resolve", resolve)
-    monkeypatch.setattr(address_guard, "is_public_address", is_public)
-    return net
-
-
-def port_of(server: LocalServer) -> int:
-    return int(server.base_url.rsplit(":", 1)[1])
 
 
 def test_connects_to_the_checked_address(local_server: LocalServer, fake_net: FakeNet) -> None:

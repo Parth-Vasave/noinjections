@@ -12,8 +12,11 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from noinjections.fetchers import address_guard
+
 FIXTURES = Path(__file__).parent / "fixtures"
 WEB_FIXTURES = FIXTURES / "web"
+LOOPBACK = "127.0.0.1"
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,8 @@ class Route:
 class RecordedRequest:
     path: str
     headers: Message
+    method: str = "GET"
+    body: bytes = b""
 
 
 class LocalServer:
@@ -68,8 +73,15 @@ class _Handler(SimpleHTTPRequestHandler):
     server: "_Server"
 
     def do_GET(self) -> None:
+        self._serve(RecordedRequest(self.path, self.headers))
+
+    def do_POST(self) -> None:
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self._serve(RecordedRequest(self.path, self.headers, "POST", body))
+
+    def _serve(self, request: RecordedRequest) -> None:
         state = self.server.state
-        state.requests.append(RecordedRequest(self.path, self.headers))
+        state.requests.append(request)
         route = state.routes.get(urlsplit(self.path).path)
         if route is None:
             super().do_GET()
@@ -119,3 +131,36 @@ def local_server(_local_httpd: LocalServer) -> Iterator[LocalServer]:
     yield _local_httpd
     _local_httpd.routes.clear()
     _local_httpd.requests.clear()
+
+
+def port_of(server: LocalServer) -> int:
+    return int(server.base_url.rsplit(":", 1)[1])
+
+
+@dataclass
+class FakeNet:
+    """Canned DNS answers, and the addresses treated as public in place of real ones."""
+
+    answers: dict[str, list[str]] = field(default_factory=dict)
+    public: set[str] = field(default_factory=lambda: {LOOPBACK})
+
+
+@pytest.fixture
+def fake_net(monkeypatch: pytest.MonkeyPatch) -> FakeNet:
+    """Make the address guard resolve and judge addresses as the test says.
+
+    The local server (127.0.0.1) stands in for a public site; nothing here leaves the machine.
+    """
+    net = FakeNet()
+    real_resolve = address_guard._resolve
+    real_is_public = address_guard.is_public_address
+
+    def resolve(host: str, port: int) -> list[str]:
+        return net.answers.get(host) or real_resolve(host, port)
+
+    def is_public(ip: address_guard.IPAddress) -> bool:
+        return str(ip) in net.public or real_is_public(ip)
+
+    monkeypatch.setattr(address_guard, "_resolve", resolve)
+    monkeypatch.setattr(address_guard, "is_public_address", is_public)
+    return net

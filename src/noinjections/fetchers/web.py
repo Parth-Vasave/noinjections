@@ -42,7 +42,8 @@ class FetchedBytes:
     ``final_url`` is normalised (see :func:`~noinjections.targets.normalize_url`). ``media_type``
     is the lowercased Content-Type without parameters, or ``""`` if the header is missing.
     ``charset`` is the declared charset if Python has a text codec for it, else ``None``.
-    ``received`` counts the body bytes read, which can be more than ``len(data)``.
+    ``received`` counts the body bytes read, which can be more than ``len(data)``. ``headers``
+    are the response's headers in order, with lowercased names and repeats kept.
     """
 
     final_url: str
@@ -51,6 +52,7 @@ class FetchedBytes:
     charset: str | None
     data: bytes
     received: int
+    headers: tuple[tuple[str, str], ...] = ()
 
     @property
     def truncated(self) -> bool:
@@ -106,8 +108,17 @@ def fetch_url(
         max_redirects=max_redirects,
         allow_private=allow_private,
         client=client,
-        accepts=_is_page_type,
+        accepts=is_page_type,
     )
+    return page_from_response(url, response)
+
+
+def page_from_response(url: str, response: FetchedBytes) -> WebPage:
+    """Decode a fetched page body into a :class:`WebPage` for the requested ``url``.
+
+    The declared charset wins, then UTF-8. A body with no Content-Type is sniffed, and
+    :class:`WebFetchError` is raised if it looks binary.
+    """
     # A declared text type means no binary sniff: see decode_text.
     encoding = response.charset or ("utf-8" if response.media_type else None)
     try:
@@ -157,43 +168,99 @@ def fetch_bytes(
         raise ValueError(f"max_redirects must be >= 0, got {max_redirects}")
     deadline = time.monotonic() + timeout
     own_client = client is None
-    if client is not None:
-        http = client
-    else:
-        http = httpx.Client() if allow_private else public_only_client()
+    http = client if client is not None else guarded_client(allow_private=allow_private)
     try:
-        return _get(http, url, max_bytes, timeout, deadline, max_redirects, accepts)
+        return fetch_request(
+            http,
+            "GET",
+            url,
+            headers={"User-Agent": USER_AGENT, "Accept": _ACCEPT},
+            max_bytes=max_bytes,
+            timeout=timeout,
+            deadline=deadline,
+            max_redirects=max_redirects,
+            accepts=accepts,
+        )
+    finally:
+        if own_client:
+            http.close()
+
+
+def guarded_client(*, allow_private: bool = False) -> httpx.Client:
+    """A new client limited to public addresses, or a plain one if ``allow_private`` is set."""
+    return httpx.Client() if allow_private else public_only_client()
+
+
+def fetch_request(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str],
+    content: bytes | None = None,
+    max_bytes: int,
+    timeout: float,
+    deadline: float,
+    max_redirects: int = DEFAULT_MAX_REDIRECTS,
+    accepts: Callable[[str], bool] | None = None,
+    require_success: bool = True,
+) -> FetchedBytes:
+    """Send one request through ``client`` and read up to ``max_bytes`` of the final response.
+
+    The core of :func:`fetch_bytes`, for callers that bring their own client and request (the
+    rendering fetcher forwards the browser's requests through it). Redirects are followed and
+    checked as in :func:`fetch_bytes`. ``deadline`` is a :func:`time.monotonic` value bounding
+    the whole exchange, and ``timeout`` is only used in the error message. With
+    ``require_success=False``, a non-2xx response is returned instead of raising. Every problem
+    raises :class:`WebFetchError` naming ``url``.
+    """
+    try:
+        return _send(
+            client,
+            client.build_request(
+                method,
+                url,
+                headers=headers,
+                content=content,
+                timeout=max(deadline - time.monotonic(), 0.0),
+            ),
+            url,
+            max_bytes,
+            timeout,
+            deadline,
+            max_redirects,
+            accepts,
+            require_success,
+        )
     except BlockedAddressError as exc:
         raise WebFetchError(url, str(exc)) from exc
     except httpx.TimeoutException as exc:
         raise WebFetchError(url, f"timed out after {timeout:g}s") from exc
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
         raise WebFetchError(url, f"{type(exc).__name__}: {exc}") from exc
-    finally:
-        if own_client:
-            http.close()
 
 
-def _get(
+def _send(
     client: httpx.Client,
+    request: httpx.Request,
     url: str,
     max_bytes: int,
     timeout: float,
     deadline: float,
     max_redirects: int,
     accepts: Callable[[str], bool] | None,
+    require_success: bool,
 ) -> FetchedBytes:
     # Redirects are followed by hand: httpx would read each redirect's body in full, and this
     # way every hop is checked before it is requested.
-    request = client.build_request(
-        "GET", url, headers={"User-Agent": USER_AGENT, "Accept": _ACCEPT}, timeout=timeout
-    )
     for hop in range(max_redirects + 1):
         _check_deadline(url, timeout, deadline)
         response = client.send(request, stream=True, follow_redirects=False)
         try:
             if not response.has_redirect_location:
-                return _read_response(response, url, max_bytes, timeout, deadline, accepts)
+                return _read_response(
+                    response, url, max_bytes, timeout, deadline, accepts, require_success
+                )
             next_request = response.next_request
         finally:
             response.close()
@@ -214,8 +281,9 @@ def _read_response(
     timeout: float,
     deadline: float,
     accepts: Callable[[str], bool] | None,
+    require_success: bool,
 ) -> FetchedBytes:
-    if not response.is_success:
+    if require_success and not response.is_success:
         raise WebFetchError(url, f"HTTP {response.status_code} {response.reason_phrase}".strip())
     media_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
     if accepts is not None and not accepts(media_type):
@@ -237,6 +305,7 @@ def _read_response(
         charset=_text_codec(response.charset_encoding),
         data=data,
         received=received,
+        headers=tuple(response.headers.multi_items()),
     )
 
 
@@ -245,7 +314,8 @@ def _check_deadline(url: str, timeout: float, deadline: float) -> None:
         raise WebFetchError(url, f"timed out after {timeout:g}s")
 
 
-def _is_page_type(media_type: str) -> bool:
+def is_page_type(media_type: str) -> bool:
+    """Whether a page of this media type can be scanned: HTML, any ``text/*``, or unknown."""
     return not media_type or media_type in HTML_MEDIA_TYPES or media_type.startswith("text/")
 
 
