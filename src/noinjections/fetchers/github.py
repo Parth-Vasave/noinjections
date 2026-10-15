@@ -1,4 +1,4 @@
-"""Fetch content from GitHub. So far: a single file, through its raw URL."""
+"""Fetch content from GitHub: a single file through its raw URL, or a whole repository."""
 
 import httpx
 
@@ -11,9 +11,15 @@ from noinjections.fetchers.content import (
     decode_text,
     text_encoding_for,
 )
-from noinjections.fetchers.local import LocalFile
+from noinjections.fetchers.git_repo import (
+    DEFAULT_CLONE_TIMEOUT_SECONDS,
+    DEFAULT_MAX_REPO_BYTES,
+    RepoFetchResult,
+    fetch_git_repo,
+)
+from noinjections.fetchers.local import DEFAULT_MAX_FILES, LocalFile
 from noinjections.fetchers.web import DEFAULT_TIMEOUT_SECONDS, fetch_bytes
-from noinjections.targets import GitHubFileTarget
+from noinjections.targets import GitHubFileTarget, GitHubRepoTarget
 
 
 def fetch_github_file(
@@ -47,3 +53,29 @@ def fetch_github_file(
     except ContentRejected as exc:
         return SkippedFile(path, exc.reason, exc.detail)
     return LocalFile(path, text, size=response.received, truncated=response.truncated)
+
+
+def fetch_github_repo(
+    target: GitHubRepoTarget,
+    *,
+    max_repo_bytes: int = DEFAULT_MAX_REPO_BYTES,
+    timeout: float = DEFAULT_CLONE_TIMEOUT_SECONDS,
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+    max_agent_file_bytes: int = DEFAULT_MAX_AGENT_FILE_BYTES,
+    max_files: int = DEFAULT_MAX_FILES,
+) -> RepoFetchResult:
+    """Shallow-clone the repository and collect its text files.
+
+    A ``ref_path`` from a ``/tree/`` URL selects the branch, tag, or commit, and the sub-path to
+    scan (see :func:`~noinjections.fetchers.git_repo.fetch_git_repo`). Problems raise
+    :class:`~noinjections.fetchers.git_repo.RepoFetchError`.
+    """
+    return fetch_git_repo(
+        target.clone_url,
+        target.ref_path,
+        max_repo_bytes=max_repo_bytes,
+        timeout=timeout,
+        max_file_bytes=max_file_bytes,
+        max_agent_file_bytes=max_agent_file_bytes,
+        max_files=max_files,
+    )
