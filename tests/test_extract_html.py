@@ -412,6 +412,13 @@ def test_comment_kinds() -> None:
     ]
 
 
+@pytest.mark.parametrize("tail", ["", "-", "--", "--!"])
+def test_unterminated_comment_is_located(tail: str) -> None:
+    segments = extract(f"<p>x</p>\n  <!-- open\nto the end{tail}")
+    comment = find(segments, "open\nto the end")
+    assert (comment.provenance.line, comment.provenance.column) == (2, 3)
+
+
 def test_comment_selector_is_its_parent_element() -> None:
     segments = extract("<div><p>x<!-- note --></p></div>")
     assert find(segments, "note").provenance.selector == "html > body > div > p"

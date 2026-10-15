@@ -179,6 +179,20 @@ class _SourceIndex(HTMLParser):
         positions = self._positions.get(key)
         return positions.popleft() if positions else None
 
+    def close(self) -> None:
+        # An unterminated comment runs to the end of the input, minus a partial "-->". Older
+        # Python patch releases (3.11.9, for one) don't report it at all, so handle it here.
+        rest = self.rawdata
+        if not self.cdata_elem and rest.startswith("<!--"):
+            end = len(rest)
+            for suffix in ("--!", "--", "-"):
+                if rest.endswith(suffix, 4):
+                    end -= len(suffix)
+                    break
+            self.handle_comment(rest[4:end])
+            self.rawdata = ""
+        super().close()
+
     def _record(self, key: _Key) -> None:
         line, offset = self.getpos()
         self._positions[key].append((line, offset + 1))
