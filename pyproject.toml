@@ -28,6 +28,7 @@ dependencies = [
     "httpcore>=1.0",  # used directly by the address guard (fetchers/address_guard.py)
     "selectolax>=0.3.21",
     "pyyaml>=6.0.1",
+    "markdown-it-py>=4.0",  # 3.x parses link reference definitions in quadratic time
 ]
 
 [project.optional-dependencies]

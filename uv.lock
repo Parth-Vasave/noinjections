@@ -1726,6 +1726,7 @@ source = { editable = "." }
 dependencies = [
     { name = "httpcore" },
     { name = "httpx" },
+    { name = "markdown-it-py" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "rich" },
@@ -1771,6 +1772,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "huggingface-hub", marker = "extra == 'ml'", specifier = ">=0.23" },
     { name = "litellm", marker = "extra == 'llm'", specifier = ">=1.40" },
+    { name = "markdown-it-py", specifier = ">=4.0" },
     { name = "numpy", marker = "extra == 'ml'", specifier = ">=1.26" },
     { name = "onnxruntime", marker = "extra == 'ml'", specifier = ">=1.18" },
     { name = "optimum", marker = "extra == 'train'", specifier = ">=1.21" },

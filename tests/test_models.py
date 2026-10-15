@@ -113,7 +113,7 @@ def test_unicode_text_survives_round_trip() -> None:
 
 
 def test_layer_values_are_snake_case_of_names() -> None:
-    assert len(Layer) == 19
+    assert len(Layer) == 20
     for layer in Layer:
         assert layer.value == layer.name.lower()
 

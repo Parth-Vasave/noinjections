@@ -10,11 +10,12 @@ document order (see :class:`_SourceIndex`). Line numbers are therefore approxima
 parsers disagree (malformed markup), a node falls back to its nearest ancestor's position.
 
 Hiding is judged from markup: the ``hidden`` attribute, inline ``style`` declarations,
-``<template>``, ``<input type=hidden>``, and elements browsers never render. For a rendered page,
-the browser has also judged every element's computed style and geometry (stylesheets, classes,
-off-screen positioning, clipping, contrast) and marked the hidden ones with attributes; see
-:func:`~noinjections.fetchers.render.render_url`. ``aria-hidden`` is deliberately not treated
-as hiding: it hides text from screen readers, but sighted readers still see it.
+``<template>``, ``<input type=hidden>``, closed ``<details>``, and elements browsers never
+render. For a rendered page, the browser has also judged every element's computed style and
+geometry (stylesheets, classes, off-screen positioning, clipping, contrast) and marked the
+hidden ones with attributes; see :func:`~noinjections.fetchers.render.render_url`.
+``aria-hidden`` is deliberately not treated as hiding: it hides text from screen readers, but
+sighted readers still see it.
 """
 
 import json
@@ -22,7 +23,7 @@ import re
 from bisect import bisect_left
 from collections import defaultdict, deque
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 from itertools import count
 from typing import Literal
@@ -55,8 +56,13 @@ ATTRIBUTE_LAYERS: dict[str, Layer] = {
     "aria-label": Layer.ARIA,
     "aria-description": Layer.ARIA,
     "title": Layer.TITLE_ATTR,
+    "href": Layer.URL,
+    "src": Layer.URL,
 }
 """Attributes whose values are extracted, on any element."""
+
+SKIPPED_URLS = frozenset({"", "#"})
+"""``href``/``src`` values that lead nowhere, so aren't extracted."""
 
 _BLOCK_TAGS = frozenset(
     {
@@ -118,13 +124,15 @@ def extract_html(
       counts (it shows in the tab).
     * ``css_hidden``: text a human can't see because of markup: the ``hidden`` attribute, inline
       ``display:none``, ``visibility:hidden``, ``font-size:0`` (also via the ``font``
-      shorthand), ``opacity:0``, ``<template>`` content, ``<input type=hidden>`` values, and
-      elements browsers don't render (``<iframe>`` fallback, ``<noembed>``, a ``<title>``
+      shorthand), ``opacity:0``, ``<template>`` content, ``<input type=hidden>`` values, the
+      content of a closed ``<details>`` (all but its first ``<summary>``), and elements
+      browsers don't render (``<iframe>`` fallback, ``<noembed>``, a ``<title>``
       other than the document's, and so on). One segment per hiding element, with the reason in
       ``provenance.hidden_reason``. Hidden text inside a paragraph gets its own segment, and
       the visible text around it stays one segment, as a human reads it.
     * ``html_comment`` (also ``<?...>`` and ``<!...>`` bogus comments), ``meta`` (``content``),
-      ``alt``, ``aria`` (``aria-label``, ``aria-description``), ``title_attr``: one segment each.
+      ``alt``, ``aria`` (``aria-label``, ``aria-description``), ``title_attr``, ``url``
+      (``href`` and ``src``, except an empty one or ``#``): one segment each.
     * ``noscript``: the text of each ``<noscript>`` element.
     * ``json_ld``: the string values of each ``application/ld+json`` script, one per line.
     * ``string_literal``: long natural-language string literals in inline JavaScript, with
@@ -442,6 +450,7 @@ class _Ctx:
     visibility: _Hider | None = None  # visibility:hidden; a descendant can set it back
     font_zero: _Hider | None = None  # font-size 0; a descendant's absolute size undoes it
     rendered: _Hider | None = None  # the browser's mark on this element's own text, if any
+    collapsed: _Hider | None = None  # a closed <details>: hides children but the <summary>
     out_of_flow: bool = False  # inside an element that takes no space (display:none, ...)
     template_depth: int = 0
 
@@ -475,7 +484,12 @@ class _Exit:
 
 class _Extractor:
     def __init__(
-        self, html: str, *, location: str, source: SourceKind, hidden_marker: str | None
+        self,
+        html: str,
+        *,
+        location: str,
+        source: SourceKind,
+        hidden_marker: str | None,
     ) -> None:
         html = _normalize_newlines(html)
         self.location = location
@@ -529,9 +543,15 @@ class _Extractor:
         for tag in tags:
             if tag is not None:
                 totals[tag] += 1
+        summary: int | None = None  # index of the child that stays visible in a closed <details>
+        content_ctx = ctx
+        if ctx.collapsed is not None:
+            summary = next((i for i, tag in enumerate(tags) if tag == "summary"), None)
+            content_ctx = replace(ctx, fixed=ctx.collapsed, collapsed=None, out_of_flow=True)
+            ctx = replace(ctx, collapsed=None)
         seen: defaultdict[str, int] = defaultdict(int)
         items: list[tuple[LexborNode, _Ctx, _Path | None]] = []
-        for node, tag in zip(nodes, tags, strict=True):
+        for index, (node, tag) in enumerate(zip(nodes, tags, strict=True)):
             path = None
             if tag is not None:
                 seen[tag] += 1
@@ -539,7 +559,7 @@ class _Extractor:
                 if totals[tag] > 1:
                     part += f":nth-of-type({seen[tag]})"
                 path = _Path(ctx.path, part)
-            items.append((node, ctx, path))
+            items.append((node, ctx if index == summary else content_ctx, path))
         stack.extend(reversed(items))
 
     def _enter(
@@ -558,8 +578,11 @@ class _Extractor:
             self._block_boundary(flush_visible=not ctx.out_of_flow)
 
         for name, layer in ATTRIBUTE_LAYERS.items():
-            if (value := attrs.get(name)) is not None:
-                self._emit(value, layer, path, pos)
+            if (value := attrs.get(name)) is None:
+                continue
+            if layer is Layer.URL and value.strip(_ASCII_WS) in SKIPPED_URLS:
+                continue
+            self._emit(value, layer, path, pos)
         if tag == "meta" and (content := attrs.get("content")) is not None:
             self._emit(content, Layer.META, path, pos)
         if tag == "input" and (attrs.get("type") or "").strip(_ASCII_WS).lower() == "hidden":
@@ -625,6 +648,10 @@ class _Extractor:
             elif tag == "noscript":
                 fixed = hider(Layer.NOSCRIPT, None)
 
+        collapsed = None
+        if tag == "details" and "open" not in attrs and fixed is None:
+            collapsed = hider(Layer.CSS_HIDDEN, "closed <details>")
+
         visibility = parent.visibility
         if style.get("visibility") in ("hidden", "collapse"):
             visibility = visibility or hider(Layer.CSS_HIDDEN, "visibility:hidden")
@@ -665,6 +692,7 @@ class _Extractor:
             visibility=visibility,
             font_zero=font_zero,
             rendered=rendered,
+            collapsed=collapsed,
             out_of_flow=(
                 parent.out_of_flow or removed is not None or rendered_removed or tag == "noscript"
             ),

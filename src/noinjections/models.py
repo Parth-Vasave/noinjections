@@ -32,6 +32,7 @@ class Layer(StrEnum):
     ALT = "alt"
     ARIA = "aria"
     TITLE_ATTR = "title_attr"
+    URL = "url"
     NOSCRIPT = "noscript"
     JSON_LD = "json_ld"
     CSS_HIDDEN = "css_hidden"

@@ -128,9 +128,11 @@ def test_marks_use_a_fresh_random_attribute(fixture_page: WebPage) -> None:
     assert re.fullmatch(r"data-noinj-[0-9a-f]{12}", marker)
     assert f'{marker}="0 display:none"' in fixture_page.text
     assert fixture_page.unchecked_text == 0
-    # Without the marker, only the markup is judged: no inline styles hide anything here.
+    # Without the marker, only the markup is judged: no inline styles hide anything here, and
+    # only the closed <details> hides text.
     plain = extract_html(fixture_page.text, location=fixture_page.url)
-    assert not [s for s in plain if s.provenance.layer is Layer.CSS_HIDDEN]
+    reasons = [s.provenance.hidden_reason for s in plain if s.provenance.layer is Layer.CSS_HIDDEN]
+    assert reasons == ["closed <details>"]
 
 
 # --- Grouping and the markup ------------------------------------------------------------------
