@@ -35,6 +35,8 @@ def test_fetches_a_fixture_page(local_server: LocalServer) -> None:
     assert page.media_type == "text/html"
     assert page.is_html
     assert not page.truncated
+    assert page.hidden_marker is None  # only rendering marks hidden text
+    assert page.unchecked_text == 0
 
 
 def test_root_serves_the_index(local_server: LocalServer) -> None:

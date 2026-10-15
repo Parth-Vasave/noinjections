@@ -499,6 +499,101 @@ def test_source_index_survives_a_parser_assertion(monkeypatch: pytest.MonkeyPatc
     assert find(segments, "after").provenance.line is None  # positions after it are lost
 
 
+# --- browser marks (rendered pages) -------------------------------------------------------
+
+M = "data-noinj-abc123"
+
+
+def marked(html: str, marker: str | None = M) -> list[tuple[Layer, str, str | None, str | None]]:
+    """(layer, text, reason, selector) of the visible and hidden segments."""
+    return [
+        (s.provenance.layer, s.text, s.provenance.hidden_reason, s.provenance.selector)
+        for s in extract_html(html, location="https://example.com/", hidden_marker=marker)
+        if s.provenance.layer in (Layer.VISIBLE_TEXT, Layer.CSS_HIDDEN)
+    ]
+
+
+def test_marked_text_is_hidden_with_the_browsers_reason() -> None:
+    html = f'<p>shown</p><p {M}="0 off-screen" {M}-root="0 off-screen">moved away</p>'
+    assert marked(html) == [
+        (Layer.VISIBLE_TEXT, "shown", None, "html > body > p:nth-of-type(1)"),
+        (Layer.CSS_HIDDEN, "moved away", "off-screen", "html > body > p:nth-of-type(2)"),
+    ]
+
+
+def test_marks_need_the_marker() -> None:
+    html = f'<p {M}="0 off-screen" {M}-root="0 off-screen">moved away</p>'
+    assert marked(html, marker=None) == [
+        (Layer.VISIBLE_TEXT, "moved away", None, "html > body > p"),
+    ]
+    assert marked(html, marker="data-noinj-other") == marked(html, marker=None)
+    assert marked(html, marker=M.upper()) == marked(html)  # attribute names are lowercased
+
+
+def test_text_sharing_a_root_is_one_segment_at_the_root() -> None:
+    html = (
+        f'<div {M}-root="3 opacity:0.02"><p {M}="3 opacity:0.02">one</p>'
+        f'<p>between</p><p {M}="3 opacity:0.02">two <b {M}="3 opacity:0.02">bold</b></p></div>'
+        "<p>after</p>"
+    )
+    assert marked(html) == [
+        (Layer.VISIBLE_TEXT, "between", None, "html > body > div > p:nth-of-type(2)"),
+        (Layer.CSS_HIDDEN, "one\ntwo bold", "opacity:0.02", "html > body > div"),
+        (Layer.VISIBLE_TEXT, "after", None, "html > body > p"),
+    ]
+
+
+def test_root_with_several_reasons() -> None:
+    html = (
+        f'<div {M}-root="0 clipped (overflow);1 low contrast (1.00:1)">'
+        f'<p {M}="0 clipped (overflow)">cut</p><p {M}="1 low contrast (1.00:1)">pale</p></div>'
+    )
+    assert [(text, reason) for _, text, reason, _ in marked(html)] == [
+        ("cut", "clipped (overflow)"),
+        ("pale", "low contrast (1.00:1)"),
+    ]
+
+
+def test_mark_without_its_root_above_is_its_own_root() -> None:
+    # Re-parsing can move script-built markup that isn't valid HTML out from under its root.
+    # The text is still hidden, at its own element.
+    html = (
+        f'<p {M}-root="0 off-screen">root</p><p {M}="0 off-screen">moved</p>'
+        f'<p {M}="9 zero size">unknown root</p>'
+    )
+    assert marked(html) == [
+        (Layer.VISIBLE_TEXT, "root", None, "html > body > p:nth-of-type(1)"),
+        (Layer.CSS_HIDDEN, "moved", "off-screen", "html > body > p:nth-of-type(2)"),
+        (Layer.CSS_HIDDEN, "unknown root", "zero size", "html > body > p:nth-of-type(3)"),
+    ]
+
+
+def test_markup_reason_wins_over_the_browsers() -> None:
+    html = f'<div style="display:none" {M}="0 display:none" {M}-root="0 display:none">x</div>'
+    assert marked(html) == [(Layer.CSS_HIDDEN, "x", "display:none", "html > body > div")]
+    html = f'<div hidden {M}="0 opacity:0" {M}-root="0 opacity:0">x</div>'
+    assert marked(html) == [(Layer.CSS_HIDDEN, "x", "hidden attribute", "html > body > div")]
+
+
+@pytest.mark.parametrize(("reason", "splits"), [("display:none", False), ("off-screen", True)])
+def test_only_removed_elements_keep_visible_text_together(reason: str, splits: bool) -> None:
+    html = f'<div>keep <div {M}="0 {reason}" {M}-root="0 {reason}">x</div> together</div>'
+    shown = [text for layer, text, _, _ in marked(html) if layer is Layer.VISIBLE_TEXT]
+    assert shown == (["keep", "together"] if splits else ["keep together"])
+
+
+def test_escaped_reason_is_decoded() -> None:
+    reason = "0 closed &lt;details&gt;"  # Chromium escapes < and > in attribute values
+    html = f'<details {M}-root="{reason}"><p {M}="{reason}">x</p></details>'
+    assert marked(html) == [(Layer.CSS_HIDDEN, "x", "closed <details>", "html > body > details")]
+
+
+@pytest.mark.parametrize("value", ["", "7", " ", ";", "0 ", ";;0  "])
+def test_malformed_marks_are_ignored(value: str) -> None:
+    html = f'<p {M}="{value}" {M}-root="{value}">shown</p>'
+    assert marked(html) == [(Layer.VISIBLE_TEXT, "shown", None, "html > body > p")]
+
+
 # --- robustness ----------------------------------------------------------------------------
 
 

@@ -66,6 +66,11 @@ class WebPage:
 
     ``url`` is the requested URL and ``final_url`` the one after redirects, both normalised.
     ``truncated`` means the body was longer than the size cap and ``text`` holds only its start.
+
+    A rendered page (:func:`~noinjections.fetchers.render.render_url`) also has
+    ``hidden_marker``: the attribute name that marks text the browser showed no human, to pass
+    to :func:`~noinjections.extractors.html_layers.extract_html`. ``unchecked_text`` counts
+    text nodes left unchecked because the page had too many elements.
     """
 
     url: str
@@ -74,6 +79,8 @@ class WebPage:
     media_type: str
     text: str
     truncated: bool = False
+    hidden_marker: str | None = None
+    unchecked_text: int = 0
 
     @property
     def is_html(self) -> bool:

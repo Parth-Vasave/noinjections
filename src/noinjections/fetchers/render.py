@@ -14,11 +14,14 @@ Needs the ``render`` extra and Playwright's Chromium; see :class:`RenderUnavaila
 import asyncio
 import contextlib
 import functools
+import secrets
 import socket
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from importlib import resources
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -82,13 +85,25 @@ _FETCH_THREADS = 8
 _MAX_PAGE_LOADS = 3
 """Loads of the top-level page: the first, plus a retry at the final URL after a redirect."""
 
-_SNAPSHOT_JS = """(limit) => {
-    const doctype = document.doctype
-        ? new XMLSerializer().serializeToString(document.doctype) : "";
-    const root = document.documentElement ? document.documentElement.outerHTML : "";
-    const html = doctype + root;
-    return html.length > limit ? html.slice(0, limit + 1) : html;
-}"""
+HIDDEN_TEXT_MIN_OPACITY = 0.1
+"""Text whose opacity, multiplied through its ancestors, is below this is hidden."""
+
+HIDDEN_TEXT_MIN_FONT_PX = 4.0
+"""Text with a computed font size below this many pixels is hidden."""
+
+HIDDEN_TEXT_MIN_VISIBLE_PX = 2.0
+"""Text showing less than this many pixels across or down (after clipping) is hidden."""
+
+HIDDEN_TEXT_MIN_CONTRAST = 1.5
+"""Text whose contrast ratio with its background is below this is hidden (WCAG ratio, 1-21)."""
+
+MAX_CHECKED_ELEMENTS = 50_000
+"""Elements with text checked for hiding per page; text past this is counted as unchecked."""
+
+_HIDDEN_TEXT_JS = (resources.files(__package__) / "hidden_text.js").read_text(encoding="utf-8")
+"""Marks hidden text and serialises the DOM; see the comment at the top of the file."""
+
+_WORLD_NAME = "noinjections"
 
 
 class RenderUnavailableError(Exception):
@@ -240,9 +255,10 @@ async def _load(browser: "Browser", session: "_Session", idle_timeout: float) ->
         # A page that keeps polling never goes idle: take the DOM as it is then.
         with contextlib.suppress(PlaywrightTimeoutError):
             await page.wait_for_load_state("networkidle", timeout=idle_ms)
-    html = await _snapshot(page, session)
+    snapshot = await _snapshot(page, session)
 
-    data = html.encode("utf-8", "surrogatepass")  # lone surrogates in JS strings become U+FFFD
+    # Lone surrogates in JS strings become U+FFFD.
+    data = snapshot.html.encode("utf-8", "surrogatepass")
     cut = len(data) > session.max_bytes
     main = session.main
     if main is None:  # can't happen: the page loaded, so the handler handed it to Chromium
@@ -254,25 +270,85 @@ async def _load(browser: "Browser", session: "_Session", idle_timeout: float) ->
         media_type=main.media_type,
         text=decode_text(data[: session.max_bytes], truncated=cut, encoding="utf-8"),
         truncated=cut or main.truncated,
+        hidden_marker=snapshot.marker,
+        unchecked_text=snapshot.unchecked,
     )
 
 
-async def _snapshot(page: "Page", session: "_Session") -> str:
-    """The DOM serialised as HTML, retried if a script navigates while it is being read."""
+@dataclass(frozen=True, slots=True)
+class _Snapshot:
+    html: str
+    marker: str
+    unchecked: int
+
+
+async def _snapshot(page: "Page", session: "_Session") -> _Snapshot:
+    """The DOM with hidden text marked, serialised as HTML.
+
+    Runs in a fresh isolated world (CDP ``Page.createIsolatedWorld``): it shares the page's DOM
+    but not its JavaScript globals, so page scripts can't patch ``getComputedStyle``,
+    ``outerHTML``, and the rest to hide text from the scan. Retried if a script navigates while
+    the page is being read. The marker attribute name is random per render, so a page can't
+    plant marks of its own.
+    """
     from playwright.async_api import Error as PlaywrightError
 
+    marker = f"data-noinj-{secrets.token_hex(6)}"
+    options = {
+        "marker": marker,
+        "limit": session.max_bytes,
+        "maxElements": MAX_CHECKED_ELEMENTS,
+        "minOpacity": HIDDEN_TEXT_MIN_OPACITY,
+        "minFontPx": HIDDEN_TEXT_MIN_FONT_PX,
+        "minVisiblePx": HIDDEN_TEXT_MIN_VISIBLE_PX,
+        "minContrast": HIDDEN_TEXT_MIN_CONTRAST,
+    }
     attempts = 3
     while True:
         attempts -= 1
         try:
-            html: str = await page.evaluate(_SNAPSHOT_JS, session.max_bytes)
+            reply = await _call_isolated(page, _HIDDEN_TEXT_JS, options)
         except PlaywrightError as exc:
             if not attempts:
                 message = f"could not read the page: {_first_line(exc)}"
                 raise WebFetchError(session.url, message) from exc
             await page.wait_for_load_state("domcontentloaded", timeout=session.remaining_ms())
-        else:
-            return html
+            continue
+        if "exceptionDetails" in reply:
+            details = reply["exceptionDetails"]
+            text = details.get("exception", {}).get("description") or details.get("text", "")
+            message = f"could not read the page: {_first_line(Exception(text))}"
+            raise WebFetchError(session.url, message)
+        value = reply["result"]["value"]
+        return _Snapshot(value["html"], marker, value["unchecked"])
+
+
+async def _call_isolated(page: "Page", function: str, argument: object) -> dict[str, Any]:
+    """Call ``function(argument)`` in a new isolated world of the page's main frame.
+
+    Returns the CDP ``Runtime.callFunctionOn`` reply: ``result.value``, or ``exceptionDetails``
+    if the function threw.
+    """
+    cdp = await page.context.new_cdp_session(page)
+    try:
+        tree = await cdp.send("Page.getFrameTree")
+        world = await cdp.send(
+            "Page.createIsolatedWorld",
+            {"frameId": tree["frameTree"]["frame"]["id"], "worldName": _WORLD_NAME},
+        )
+        reply: dict[str, Any] = await cdp.send(
+            "Runtime.callFunctionOn",
+            {
+                "functionDeclaration": function,
+                "executionContextId": world["executionContextId"],
+                "arguments": [{"value": argument}],
+                "returnByValue": True,
+            },
+        )
+        return reply
+    finally:
+        with contextlib.suppress(Exception):
+            await cdp.detach()
 
 
 class _Session:

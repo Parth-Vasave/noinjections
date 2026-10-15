@@ -9,9 +9,11 @@ comment, and text run starts, and lexbor nodes are matched to those positions by
 document order (see :class:`_SourceIndex`). Line numbers are therefore approximate: where the two
 parsers disagree (malformed markup), a node falls back to its nearest ancestor's position.
 
-Hiding is judged from markup alone: the ``hidden`` attribute, inline ``style`` declarations,
-``<template>``, ``<input type=hidden>``, and elements browsers never render. Stylesheets, classes,
-and computed styles are Checkpoint 2.2 (rendered). ``aria-hidden`` is deliberately not treated
+Hiding is judged from markup: the ``hidden`` attribute, inline ``style`` declarations,
+``<template>``, ``<input type=hidden>``, and elements browsers never render. For a rendered page,
+the browser has also judged every element's computed style and geometry (stylesheets, classes,
+off-screen positioning, clipping, contrast) and marked the hidden ones with attributes; see
+:func:`~noinjections.fetchers.render.render_url`. ``aria-hidden`` is deliberately not treated
 as hiding: it hides text from screen readers, but sighted readers still see it.
 """
 
@@ -74,6 +76,9 @@ _CSS_WIDE_KEYWORDS = frozenset({"inherit", "initial", "unset", "revert", "revert
 _UNRENDERED_TAGS = frozenset({"noembed", "noframes", "iframe", "datalist", "rp", "title"})
 """Elements whose text content browsers don't render (only the document ``<title>`` shows)."""
 
+_RENDERED_REMOVED = frozenset({"display:none", "not rendered"})
+"""Browser hiding reasons for an element that takes no space, so doesn't split visible text."""
+
 _JS_TYPES = frozenset(
     {
         "", "module", "application/ecmascript", "application/javascript",
@@ -92,11 +97,20 @@ Pos = tuple[int, int]
 
 
 def extract_html(
-    html: str, *, location: str, source: SourceKind = SourceKind.WEB
+    html: str,
+    *,
+    location: str,
+    source: SourceKind = SourceKind.WEB,
+    hidden_marker: str | None = None,
 ) -> list[TextSegment]:
     """Extract every text layer of an HTML document as :class:`TextSegment` items.
 
     ``location`` (a URL or path) and ``source`` go into each segment's provenance.
+    ``hidden_marker`` is a rendered page's
+    :attr:`~noinjections.fetchers.web.WebPage.hidden_marker`: with it, text the browser marked
+    as hidden is ``css_hidden`` too, with the browser's reason (``"off-screen"``,
+    ``"low contrast (1.00:1)"``, ...). Where the markup alone already hides text, the markup's
+    reason is kept.
 
     Layers:
 
@@ -120,7 +134,7 @@ def extract_html(
     path such as ``html > body > div:nth-of-type(2) > p`` (for a comment: its parent element),
     and ``line``/``column`` locate where the text, or its element, starts in ``html``.
     """
-    return _Extractor(html, location=location, source=source).run()
+    return _Extractor(html, location=location, source=source, hidden_marker=hidden_marker).run()
 
 
 # --- source positions ----------------------------------------------------------------------
@@ -427,14 +441,15 @@ class _Ctx:
     fixed: _Hider | None = None  # hiding no descendant can undo (display:none, opacity:0, ...)
     visibility: _Hider | None = None  # visibility:hidden; a descendant can set it back
     font_zero: _Hider | None = None  # font-size 0; a descendant's absolute size undoes it
+    rendered: _Hider | None = None  # the browser's mark on this element's own text, if any
     out_of_flow: bool = False  # inside an element that takes no space (display:none, ...)
     template_depth: int = 0
 
     @property
     def hider(self) -> _Hider | None:
-        """The outermost hider in effect, if any."""
+        """The outermost hider in effect, if any; the markup's before the browser's."""
         hiders = [h for h in (self.fixed, self.visibility, self.font_zero) if h is not None]
-        return min(hiders, key=lambda h: h.key) if hiders else None
+        return min(hiders, key=lambda h: h.key) if hiders else self.rendered
 
 
 @dataclass(slots=True)
@@ -459,10 +474,14 @@ class _Exit:
 
 
 class _Extractor:
-    def __init__(self, html: str, *, location: str, source: SourceKind) -> None:
+    def __init__(
+        self, html: str, *, location: str, source: SourceKind, hidden_marker: str | None
+    ) -> None:
         html = _normalize_newlines(html)
         self.location = location
         self.source = source
+        self.marker = hidden_marker.lower() if hidden_marker is not None else None
+        self.marked_roots: dict[str, _Hider] = {}  # by mark id; only roots being walked
         self.index = _SourceIndex(html)
         self.tree = LexborHTMLParser(html)
         self.fragments: list[LexborHTMLParser] = []  # keeps re-parsed templates alive
@@ -619,6 +638,17 @@ class _Extractor:
         elif font_size == "absolute":
             font_zero = None
 
+        rendered: _Hider | None = None
+        rendered_removed = False
+        if self.marker is not None:
+            for mark_id, reason in _marks(attrs.get(self.marker + "-root")):
+                self.marked_roots[mark_id] = hider(Layer.CSS_HIDDEN, reason)
+                rendered_removed = rendered_removed or reason in _RENDERED_REMOVED
+            for mark_id, reason in _marks(attrs.get(self.marker))[:1]:
+                # The root is an ancestor unless re-parsing the serialised DOM moved this
+                # element (script-built markup that isn't valid HTML): then it's its own root.
+                rendered = self.marked_roots.get(mark_id) or hider(Layer.CSS_HIDDEN, reason)
+
         if tag == "template":
             is_block = True  # its content is a separate document: keep it apart from neighbours
         elif display not in (None, "none") and display not in _CSS_WIDE_KEYWORDS:
@@ -634,7 +664,10 @@ class _Extractor:
             fixed=fixed,
             visibility=visibility,
             font_zero=font_zero,
-            out_of_flow=parent.out_of_flow or removed is not None or tag == "noscript",
+            rendered=rendered,
+            out_of_flow=(
+                parent.out_of_flow or removed is not None or rendered_removed or tag == "noscript"
+            ),
             template_depth=parent.template_depth + (tag == "template"),
         )
         return ctx, new_hiders, is_block
@@ -660,6 +693,10 @@ class _Extractor:
         for key in item.hider_keys:
             if (run := self.hidden_runs.pop(key, None)) is not None:
                 self._flush(run)
+        if item.hider_keys and self.marked_roots:
+            keys = set(item.hider_keys)
+            for mark_id in [i for i, h in self.marked_roots.items() if h.key in keys]:
+                del self.marked_roots[mark_id]
 
     def _text(self, data: str, ctx: _Ctx) -> None:
         if not data.strip(_ASCII_WS):
@@ -757,6 +794,16 @@ class _Extractor:
             hidden_reason=hidden_reason if layer is Layer.CSS_HIDDEN else None,
         )
         self.segments.append(TextSegment(text=text, provenance=provenance))
+
+
+def _marks(value: str | None) -> list[tuple[str, str]]:
+    """The ``(id, reason)`` pairs of a hidden-text mark: ``"<id> <reason>"``, joined by ``;``."""
+    marks = []
+    for item in (value or "").split(";"):
+        mark_id, _, reason = item.strip(_ASCII_WS).partition(" ")
+        if mark_id and reason.strip(_ASCII_WS):
+            marks.append((mark_id, reason.strip(_ASCII_WS)))
+    return marks
 
 
 def _child_list(node: LexborNode) -> list[LexborNode]:
